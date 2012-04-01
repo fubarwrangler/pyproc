@@ -24,7 +24,8 @@ import traceback
 from subprocess import Popen, PIPE, STDOUT
 
 __all__ = ['ProcessError', 'CannotKill', 'TimedOut', 'PIPE', 'STDOUT',
-           'Program', 'Process', 'run_with_timeout', 'CallbackProcess']
+           'Program', 'Process', 'TimeoutProcess', 'CallbackProcess',
+           'run_with_timeout']
 
 class ProcessError(Exception):
     pass
@@ -35,6 +36,8 @@ class CannotKill(ProcessError):
 class TimedOut(ProcessError):
     pass
 
+class CallbackFailed(ProcessError):
+    pass
 
 class Program(object):
     """ Object to parse a command line and give the proper args """
@@ -122,21 +125,8 @@ class Process(object):
             if not self._periodic_status_checks():
                 break
 
-        if self.timed_out:
-            self.do_timeout()
-
     def _periodic_status_checks(self):
-        if self.timeout and time.time() - self.start_t > self.timeout:
-            self.timed_out = True
-            return False
         return True
-
-    def do_timeout(self):
-        self.send_signal(signal.SIGTERM)
-        if self.proc.poll() is None:
-            self.kill_process()
-        if self.raise_on_timeout:
-            raise TimedOut("PID: %d timed out" % self.pid)
 
     def run(self, poll_interval=0.5):
         """ Runs the program, not gathering output, so please don't use if
@@ -148,14 +138,8 @@ class Process(object):
             time.sleep(poll_interval)
             if self.chk_term():
                 break
-            if self.timeout:
-                if time.time() - self.start_t > self.timeout:
-                    self.timed_out = True
-                    self.send_signal(signal.SIGINT)
-                    break
-
-        if self.timed_out:
-            self.do_timeout()
+            if not self._periodic_status_checks():
+                break
 
     def kill_process(self, termpause=0.2, killpause=0.1, kill_lim=20):
         """ Send a sigterm, pause 'termpause' number of seconds, then if still
@@ -210,7 +194,42 @@ class Process(object):
         self.outstream = stream
 
 
-class CallbackProcess(Process):
+class TimeoutProcess(Process):
+
+    def __init__(self, prog, stdout=PIPE, stderr=PIPE, stdin=None,
+                 timeout=None, raise_on_timeout=False):
+        super(TimeoutProcess, self).__init__(prog, stdout, stderr, stdin)
+        self.timed_out = False
+        self.timeout = timeout
+        self.raise_on_timeout = raise_on_timeout
+
+    def post_checks(self):
+        if self.timed_out:
+            self.do_timeout()
+
+    def do_timeout(self):
+        self.send_signal(signal.SIGTERM)
+        if self.proc.poll() is None:
+            self.kill_process()
+        if self.raise_on_timeout:
+            raise TimedOut("PID: %d timed out" % self.pid)
+
+    def _periodic_status_checks(self):
+        if self.timeout and time.time() - self.start_t > self.timeout:
+            self.timed_out = True
+            return False
+        return True
+
+    def gather_output(self, poll_freq=0.1):
+        super(TimeoutProcess, self).gather_output(poll_freq)
+        self.post_checks()
+
+    def run(self, poll_interval=0.5):
+        super(TimeoutProcess, self).run(poll_interval)
+        self.post_checks()
+
+
+class CallbackProcess(TimeoutProcess):
     """ A process that runs a callback function periodically that, if it
         fails, terminates the process.  The extra arguments are as follows:
             @callback: callable object that runs periodically
@@ -225,7 +244,7 @@ class CallbackProcess(Process):
 
     def __init__(self, prog, callback, callback_args, callback_freq,
                  stdout=PIPE, stderr=PIPE, stdin=None, timeout=None,
-                 raise_on_timeout=False):
+                 raise_on_timeout=False, raise_on_callback=False):
         super(CallbackProcess, self).__init__(prog, stdout, stderr, stdin,
                                               timeout, raise_on_timeout)
         self.callback = callback
@@ -233,6 +252,7 @@ class CallbackProcess(Process):
         self.callback_freq = callback_freq
         self.callback_failure = False
         self.last_callback = 0
+        self.raise_on_callback = raise_on_callback
 
     def _periodic_status_checks(self):
         now = time.time()
@@ -254,6 +274,13 @@ class CallbackProcess(Process):
             self.last_callback = now
 
         return True
+
+    def post_checks(self):
+        if self.timed_out:
+            self.do_timeout()
+        if self.callback_failure and self.raise_on_callback:
+            raise CallbackFailed("Callback failed for process %d" % self.pid)
+
 
 
 def run_with_timeout(cmdline, env=None, timeout=None):
@@ -284,12 +311,10 @@ if __name__ == "__main__":
             cb.a = cb.a + b
         if cb.a > 10:
             return False
-        elif cb.a > 6:
-            sys.what()
         return True
 
     c = Program('find /')
-    p = CallbackProcess(c, cb, (3, 2), 0.1, timeout=0.7)
+    p = CallbackProcess(c, cb, (1, 3), 0.1, timeout=0.7, raise_on_callback=0)
     p.gather_output(0.01)
 
     print "Stdout: %d bytes\nStderr: %d bytes" % (len(p.stdout), len(p.stderr))
