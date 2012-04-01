@@ -1,0 +1,19 @@
+process: A module to run child-processes in python with better control
+than is available in the subprocess module alone.
+
+Offers sanity checking of what will be run via Program(strict=True),
+timeout checking of a running process via TimeoutProcess(), and the 
+ability to run a callback periodically that will kill the process if
+if fails via CallbackProcess().
+
+This started as being designed for use in larger programs that need
+to be sure no child-process will block indefinitely and using SIGALRM
+isn't easy because the process is threaded. It evolved to grow a 
+callback feature that is used, for example, to check the progress of
+a long and slow FTP (if the file hasn't grown in the last hour, kill
+the FTP and try again later).
+
+Tests? We don't need to stinkin' tests!
+...
+Actually, we probably do
+
