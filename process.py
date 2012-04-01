@@ -62,8 +62,22 @@ class Program(object):
             self._strict_checks()
 
     def _strict_checks(self):
+
+        if os.getenv("PATH"):
+            path_list = os.environ["PATH"].split(":")
+        else:
+            path_list = os.defpath.split(":")
+
         if not os.path.exists(self.exe):
-            raise ProcessError("Cannot find executable %s" % self.exe)
+            found = False
+            for p in (os.path.join(x, self.exe) for x in path_list):
+                if os.path.exists(p):
+                    self.exe = p
+                    found = True
+                    break
+            if not found:
+                raise ProcessError("Cannot find executable %s" % self.exe)
+
         if not os.access(self.exe, os.X_OK):
             raise ProcessError("Permission denied to exec %s" % self.exe)
 
@@ -334,6 +348,7 @@ if __name__ == "__main__":
     p = CallbackProcess(c, cb, (1, 3), 0.1, timeout=0.7, raise_on_callback=0)
     p.gather_output(0.01)
 
+    print "Ran: %s" % c.exe
     print "Stdout: %d bytes\nStderr: %d bytes" % (len(p.stdout), len(p.stderr))
     print "Return Value: %s" % p.exit_status
     print "Callback Failure: %s\nTimed Out: %s" % (p.callback_failure, p.timed_out)
