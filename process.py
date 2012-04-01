@@ -27,6 +27,7 @@ __all__ = ['ProcessError', 'CannotKill', 'TimedOut', 'PIPE', 'STDOUT',
            'Program', 'Process', 'TimeoutProcess', 'CallbackProcess',
            'run_with_timeout']
 
+
 class ProcessError(Exception):
     pass
 
@@ -39,9 +40,15 @@ class TimedOut(ProcessError):
 class CallbackFailed(ProcessError):
     pass
 
+
 class Program(object):
-    """ Object to parse a command line and give the proper args """
-    def __init__(self, cmdline, env=None, update_env=True):
+    """ Object to parse a command line and give the proper args.  Will
+        update the environment with new @env if present and @update_env is
+        True, if @env present and @update_env if False, will run the new
+        program in those environment variables only.  If @env is None
+        (the default), the environment is passed through untouched.
+    """
+    def __init__(self, cmdline, env=None, update_env=True, strict=False):
         self.args = shlex.split(cmdline)
         if env and update_env:
             new_env = dict(os.environ)
@@ -51,23 +58,30 @@ class Program(object):
             self.env = env
         self.cmdline = cmdline
         self.exe = self.args[0]
+        if strict:
+            self._strict_checks()
+
+    def _strict_checks(self):
+        if not os.path.exists(self.exe):
+            raise ProcessError("Cannot find executable %s" % self.exe)
+        if not os.access(self.exe, os.X_OK):
+            raise ProcessError("Permission denied to exec %s" % self.exe)
 
     def __str__(self):
         return str(self.cmdline)
 
 
 class Process(object):
-    """ An object that runs a subprocess with a timeout """
-    def __init__(self, prog, stdout=PIPE, stderr=PIPE, stdin=None,
-                       timeout=None, raise_on_timeout=False):
+    """ An object that runs a subprocess gathering output into strings.
+        Takes a Program object as @prog and stdio streams are by default
+        output to a buffer.
+    """
+    def __init__(self, prog, stdout=PIPE, stderr=PIPE, stdin=None):
         self.cmd = prog
-        self.timeout = timeout
         self.exit_status = None
         self.outstream = stdout
         self.errstream = stderr
         self.instream = stdin
-        self.raise_on_timeout = raise_on_timeout
-        self.timed_out = False
 
     def start(self, close_fds=True):
         """ Forks and execs the child process, then returns.  Child write()'s
@@ -86,7 +100,6 @@ class Process(object):
             flags = fcntl.fcntl(proc.stderr, fcntl.F_GETFL)
             fcntl.fcntl(proc.stderr, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         self.proc = proc
-        self.start_t = time.time()
 
     def gather_output(self, poll_freq=0.1):
         """ Talks to a process, using select to multiplex over the various
@@ -170,17 +183,13 @@ class Process(object):
             return True
         return False
 
-    def signal(self, signum):
-        """ Send signal to process """
-        os.kill(self.pid, signum)
-
     def send_signal(self, signum):
         """ Send a signal to the process, returning True if it was delivered,
             False if the process has exited, and raising an exception on any
             other error.
         """
         try:
-            self.signal(signum)
+            os.kill(self.pid, signum)
         except OSError, e:
             if e.errno != errno.ESRCH:
                 raise
@@ -195,6 +204,9 @@ class Process(object):
 
 
 class TimeoutProcess(Process):
+    """ Run a process with a timeout...each time around the select/wait loop
+        check that the process didn't timeout
+    """
 
     def __init__(self, prog, stdout=PIPE, stderr=PIPE, stdin=None,
                  timeout=None, raise_on_timeout=False):
@@ -202,10 +214,15 @@ class TimeoutProcess(Process):
         self.timed_out = False
         self.timeout = timeout
         self.raise_on_timeout = raise_on_timeout
+        self.start_t = 0
 
     def post_checks(self):
         if self.timed_out:
             self.do_timeout()
+
+    def start(self, close_fds=True):
+        super(TimeoutProcess, self).start(close_fds)
+        self.start_t = time.time()
 
     def do_timeout(self):
         self.send_signal(signal.SIGTERM)
@@ -282,7 +299,6 @@ class CallbackProcess(TimeoutProcess):
             raise CallbackFailed("Callback failed for process %d" % self.pid)
 
 
-
 def run_with_timeout(cmdline, env=None, timeout=None):
     """ Helper function, runs a command cmdline in environment env, gathers
         output, and stops execution forcibly if timeout is reached.  Returns
@@ -294,9 +310,10 @@ def run_with_timeout(cmdline, env=None, timeout=None):
     proc = Process(p, timeout=timeout)
     proc.gather_output()
 
-    out = proc.stdout
-    err = proc.stderr
-    rv = proc.exit_status
+    out = str(proc.stdout)
+    err = str(proc.stderr)
+    rv = int(proc.exit_status)
+
     del proc
 
     return out, err, rv
@@ -313,7 +330,7 @@ if __name__ == "__main__":
             return False
         return True
 
-    c = Program('find /')
+    c = Program('find /', strict=True)
     p = CallbackProcess(c, cb, (1, 3), 0.1, timeout=0.7, raise_on_callback=0)
     p.gather_output(0.01)
 
